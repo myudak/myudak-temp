@@ -27,57 +27,56 @@ jobs:
         continue-on-error: true
         run: |
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-          URL='https://yandex.com/images/touch/search?rpt=imageview&format=json&request={"blocks":[{"block":"cbir-uploader__get-cbir-id"}]}'
-          curl -sS -L -A "$UA" \
-            -H 'X-Requested-With: XMLHttpRequest' \
-            -H 'Accept: application/json, text/javascript, */*; q=0.01' \
-            -F 'upfile=@photo.jpg;type=image/jpeg' \
-            "$URL" -D yandex-api-headers.txt -o yandex-api.json
-          echo '=== YANDEX API HEADERS ==='
-          cat yandex-api-headers.txt
-          echo '=== YANDEX API BODY ==='
-          head -c 12000 yandex-api.json
-          echo
+          REQ='%7B%22blocks%22%3A%5B%7B%22block%22%3A%22cbir-uploader__get-cbir-id%22%7D%5D%7D'
+          for HOST in yandex.com yandex.ru; do
+            URL="https://$HOST/images/touch/search?rpt=imageview&format=json&request=$REQ"
+            curl -sS -L -A "$UA" \
+              -H 'X-Requested-With: XMLHttpRequest' \
+              -H 'Accept: application/json, text/javascript, */*; q=0.01' \
+              -F 'upfile=@photo.jpg;type=image/jpeg' \
+              "$URL" -D "yandex-api-$HOST-headers.txt" -o "yandex-api-$HOST.json" || true
+            echo "=== $HOST BODY ==="
+            head -c 12000 "yandex-api-$HOST.json" 2>/dev/null || true
+            echo
+          done
           python - <<'PY'
           import json, pathlib, urllib.parse
-          p=pathlib.Path('yandex-api.json')
-          try:
-              d=json.loads(p.read_text())
-              params=d['blocks'][0]['params']
-              cbir=params['cbirId']
-              original=params['originalImageUrl']
-              url='https://yandex.com/images/search?'+urllib.parse.urlencode({'cbir_id':cbir,'rpt':'imageview','tabInt':'1','url':original})
-              pathlib.Path('yandex-result-url.txt').write_text(url)
-              print('YANDEX_RESULT_URL='+url)
-          except Exception as e:
-              print('PARSE_ERROR',repr(e))
-              pathlib.Path('yandex-result-url.txt').write_text('')
+          chosen=None
+          for host in ('yandex.com','yandex.ru'):
+              p=pathlib.Path(f'yandex-api-{host}.json')
+              try:
+                  d=json.loads(p.read_text())
+                  params=d['blocks'][0]['params']
+                  chosen=(host,params['cbirId'],params['originalImageUrl'])
+                  break
+              except Exception as e:
+                  print(host,'PARSE_ERROR',repr(e))
+          if chosen:
+              host,cbir,original=chosen
+              url=f'https://{host}/images/search?'+urllib.parse.urlencode({'cbir_id':cbir,'rpt':'imageview','tabInt':'1','url':original})
+          else:
+              url=''
+          pathlib.Path('yandex-result-url.txt').write_text(url)
+          print('YANDEX_RESULT_URL='+url)
           PY
           if [ -s yandex-result-url.txt ]; then
             curl -sS -L -A "$UA" "$(cat yandex-result-url.txt)" -D yandex-result-headers.txt -o yandex-result.html
           fi
           python - <<'PY'
-          import re, html, pathlib, json
+          import re, html, pathlib
           p=pathlib.Path('yandex-result.html')
           if not p.exists(): raise SystemExit
           s=html.unescape(p.read_text(errors='ignore'))
           print('YANDEX_HTML_BYTES',len(s))
           print('TITLE',re.findall(r'<title[^>]*>(.*?)</title>',s,re.I|re.S)[:3])
-          pats=[
-            r'"title":"([^\"]{4,300})"',
-            r'"snippet":"([^\"]{4,500})"',
-            r'"description":"([^\"]{4,500})"',
-            r'"url":"(https?://[^\"]+)"',
-            r'"pageUrl":"(https?://[^\"]+)"',
-            r'liberat[^\"<>]{0,250}',r'1944[^\"<>]{0,250}',r'priest[^\"<>]{0,250}',r'curé[^\"<>]{0,250}'
-          ]
+          pats=[r'"title":"([^\"]{4,300})"',r'"snippet":"([^\"]{4,500})"',r'"description":"([^\"]{4,500})"',r'"url":"(https?://[^\"]+)"',r'"pageUrl":"(https?://[^\"]+)"',r'liberat[^\"<>]{0,250}',r'1944[^\"<>]{0,250}',r'priest[^\"<>]{0,250}',r'curé[^\"<>]{0,250}']
           for pat in pats:
               vals=[]
               for x in re.findall(pat,s,re.I):
                   if isinstance(x,tuple): x=' '.join(x)
                   x=x.replace('\\/','/')
                   if x not in vals: vals.append(x)
-                  if len(vals)>=250: break
+                  if len(vals)>=300: break
               if vals:
                   print('\nPATTERN',pat)
                   print('\n'.join(vals))
@@ -90,13 +89,11 @@ jobs:
           B64="$(base64 -w0 photo.jpg)"
           ENDPOINT='https://www.bing.com/images/search?view=detailv2&iss=sbiupload&FORM=SBIHMP&sbifnm=photo.jpg'
           curl -sS -L -A "$UA" \
-            --data-urlencode "imageBin=$B64" \
+            -F "imageBin=$B64" \
             "$ENDPOINT" -D bing-headers.txt -o bing.html -w '%{url_effective}' > bing-final-url.txt
           echo 'BING_FINAL_URL='
           cat bing-final-url.txt
           echo
-          echo '=== BING HEADERS ==='
-          cat bing-headers.txt
           python - <<'PY'
           import re, html, pathlib
           p=pathlib.Path('bing.html')
@@ -104,22 +101,14 @@ jobs:
           s=html.unescape(p.read_text(errors='ignore'))
           print('BING_HTML_BYTES',len(s))
           print('TITLE',re.findall(r'<title[^>]*>(.*?)</title>',s,re.I|re.S)[:3])
-          pats=[
-            r'"title":"([^\"]{4,300})"',
-            r'"name":"([^\"]{4,300})"',
-            r'"description":"([^\"]{4,500})"',
-            r'"contentUrl":"(https?://[^\"]+)"',
-            r'"hostPageUrl":"(https?://[^\"]+)"',
-            r'https?://[^\"<> ]+',
-            r'liberat[^\"<>]{0,250}',r'1944[^\"<>]{0,250}',r'priest[^\"<>]{0,250}',r'curé[^\"<>]{0,250}'
-          ]
+          pats=[r'"title":"([^\"]{4,300})"',r'"name":"([^\"]{4,300})"',r'"description":"([^\"]{4,500})"',r'"contentUrl":"(https?://[^\"]+)"',r'"hostPageUrl":"(https?://[^\"]+)"',r'https?://[^\"<> ]+',r'liberat[^\"<>]{0,250}',r'1944[^\"<>]{0,250}',r'priest[^\"<>]{0,250}',r'curé[^\"<>]{0,250}']
           for pat in pats:
               vals=[]
               for x in re.findall(pat,s,re.I):
                   if isinstance(x,tuple): x=' '.join(x)
                   x=x.replace('\\/','/')
                   if x not in vals: vals.append(x)
-                  if len(vals)>=250: break
+                  if len(vals)>=300: break
               if vals:
                   print('\nPATTERN',pat)
                   print('\n'.join(vals))
@@ -132,8 +121,8 @@ jobs:
           if-no-files-found: warn
           path: |
             photo.jpg
-            yandex-api.json
-            yandex-api-headers.txt
+            yandex-api-*.json
+            yandex-api-*-headers.txt
             yandex-result-url.txt
             yandex-result.html
             yandex-result-headers.txt
