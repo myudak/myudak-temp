@@ -21,64 +21,87 @@ jobs:
           pathlib.Path('photo.jpg').write_bytes(base64.b64decode(data))
           print('jpeg bytes', pathlib.Path('photo.jpg').stat().st_size)
           PY
-      - name: Google reverse image search
+
+      - name: Yandex reverse image search
         run: |
-          set -x
-          curl -sS -L -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130 Safari/537.36' \
-            -D google-headers.txt \
-            -F 'encoded_image=@photo.jpg;type=image/jpeg' \
-            -F 'image_content=' \
-            'https://www.google.com/searchbyimage/upload' \
-            -o google.html
-          echo '=== GOOGLE HEADERS ==='
-          cat google-headers.txt
-          echo '=== GOOGLE TITLE ==='
-          grep -o '<title[^>]*>[^<]*' google.html | head -5 || true
-          echo '=== GOOGLE URL/TEXT HINTS ==='
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+          curl -sS -A "$UA" \
+            -F 'upfile=@photo.jpg;type=image/jpeg' \
+            'https://yandex.com/images-apphost/image-download' \
+            -o yandex-upload.json
+          echo '=== YANDEX UPLOAD ==='
+          cat yandex-upload.json
           python - <<'PY'
-          import re, html
-          s=open('google.html',errors='ignore').read()
-          s=html.unescape(s)
-          for pat in [r'https?://[^\"<> ]+', r'OSDFLAG[^\"<> ]*', r'liberat[^\"<>]{0,100}', r'1944[^\"<>]{0,100}']:
+          import json, pathlib, urllib.parse
+          data=json.loads(pathlib.Path('yandex-upload.json').read_text())
+          params={'rpt':'imageview','url':data.get('url','')}
+          image_id=data.get('id') or data.get('image_id')
+          if image_id: params['cbir_id']=image_id
+          url='https://yandex.com/images/search?'+urllib.parse.urlencode(params)
+          pathlib.Path('yandex-search-url.txt').write_text(url)
+          print('SEARCH_URL='+url)
+          PY
+          curl -sS -L -A "$UA" "$(cat yandex-search-url.txt)" -o yandex.html
+          echo '=== YANDEX TITLE ==='
+          grep -o '<title[^>]*>[^<]*' yandex.html | head -5 || true
+          echo '=== YANDEX RESULT URLS/TEXT ==='
+          python - <<'PY'
+          import re, html, pathlib, json
+          s=html.unescape(pathlib.Path('yandex.html').read_text(errors='ignore'))
+          pats=[
+            r'"url":"(https?://[^\"]+)"',
+            r'"source_url":"(https?://[^\"]+)"',
+            r'"page_url":"(https?://[^\"]+)"',
+            r'"title":"([^\"]{4,200})"',
+            r'liberat[^\"<>]{0,180}', r'1944[^\"<>]{0,180}', r'commune[^\"<>]{0,180}'
+          ]
+          for pat in pats:
               print('\nPATTERN',pat)
               seen=[]
               for x in re.findall(pat,s,re.I):
-                  if x not in seen:
-                      seen.append(x)
-                  if len(seen)>=40: break
+                  if isinstance(x,tuple): x=' '.join(x)
+                  x=x.replace('\\/','/')
+                  if x not in seen: seen.append(x)
+                  if len(seen)>=100: break
               print('\n'.join(seen))
           PY
-      - name: Lens upload endpoint
+
+      - name: Google Lens upload endpoint
         run: |
-          curl -sS -L -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130 Safari/537.36' \
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+          curl -sS -L -A "$UA" \
             -D lens-headers.txt \
             -F 'encoded_image=@photo.jpg;type=image/jpeg' \
-            -F 'processed_image_dimensions=320,249' \
+            -F 'sbisrc=Chromium' \
             'https://lens.google.com/v3/upload' \
             -o lens.html || true
           echo '=== LENS HEADERS ==='
           cat lens-headers.txt || true
           echo '=== LENS TITLE ==='
           grep -o '<title[^>]*>[^<]*' lens.html | head -5 || true
-          echo '=== LENS HINTS ==='
+          echo '=== LENS URLS/TEXT ==='
           python - <<'PY'
           import re, html, pathlib
           p=pathlib.Path('lens.html')
           if not p.exists(): raise SystemExit
           s=html.unescape(p.read_text(errors='ignore'))
-          for pat in [r'https?://[^\"<> ]+', r'liberat[^\"<>]{0,120}', r'1944[^\"<>]{0,120}', r'commune[^\"<>]{0,120}']:
+          pats=[r'https?://[^\"<> ]+', r'liberat[^\"<>]{0,180}', r'1944[^\"<>]{0,180}', r'commune[^\"<>]{0,180}']
+          for pat in pats:
               print('\nPATTERN',pat)
               seen=[]
               for x in re.findall(pat,s,re.I):
                   if x not in seen: seen.append(x)
-                  if len(seen)>=60: break
+                  if len(seen)>=100: break
               print('\n'.join(seen))
           PY
+
       - uses: actions/upload-artifact@v4
         with:
           name: reverse-search-results
           path: |
-            google.html
-            google-headers.txt
+            photo.jpg
+            yandex-upload.json
+            yandex-search-url.txt
+            yandex.html
             lens.html
             lens-headers.txt
