@@ -13,13 +13,10 @@ jobs:
 
       - name: Extract image
         run: |
-          python - <<'PY'
-          import base64, re, pathlib
-          text = pathlib.Path('ctf-photo.svg').read_text()
-          data = re.search(r'base64,([^\"]+)', text).group(1)
-          pathlib.Path('photo.jpg').write_bytes(base64.b64decode(data))
-          print('image bytes', pathlib.Path('photo.jpg').stat().st_size)
-          PY
+          cat original-photo.b64.1 original-photo.b64.2 | base64 -d > photo.jpg
+          file photo.jpg
+          identify photo.jpg
+          stat -c 'image bytes %s' photo.jpg
 
       - name: Install browser
         run: |
@@ -94,11 +91,11 @@ jobs:
           PY
           python reverse_browser.py
           echo '=== BING BODY ==='
-          sed -n '1,240p' bing-browser.txt 2>/dev/null || true
+          sed -n '1,300p' bing-browser.txt 2>/dev/null || true
           echo '=== GOOGLE LENS BODY ==='
-          sed -n '1,240p' google-lens-browser.txt 2>/dev/null || true
+          sed -n '1,300p' google-lens-browser.txt 2>/dev/null || true
           echo '=== YANDEX BODY ==='
-          sed -n '1,240p' yandex-browser.txt 2>/dev/null || true
+          sed -n '1,300p' yandex-browser.txt 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         if: always()
