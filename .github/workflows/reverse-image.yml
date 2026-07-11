@@ -12,14 +12,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Extract JPEG
+      - name: Extract and upscale JPEG
         run: |
+          python -m pip install -q pillow
           python - <<'PY'
           import base64, re, pathlib
+          from PIL import Image
           text = pathlib.Path('ctf-photo.svg').read_text()
           data = re.search(r'base64,([^\"]+)', text).group(1)
-          pathlib.Path('photo.jpg').write_bytes(base64.b64decode(data))
-          print('jpeg bytes', pathlib.Path('photo.jpg').stat().st_size)
+          pathlib.Path('photo-small.jpg').write_bytes(base64.b64decode(data))
+          im=Image.open('photo-small.jpg').convert('RGB')
+          im=im.resize((800, round(800*im.height/im.width)), Image.Resampling.LANCZOS)
+          im.save('photo.jpg', quality=95)
+          print('jpeg dimensions', im.size, 'bytes', pathlib.Path('photo.jpg').stat().st_size)
           PY
 
       - name: Yandex reverse image search
