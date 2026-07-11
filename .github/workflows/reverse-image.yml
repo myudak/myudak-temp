@@ -1,4 +1,4 @@
-name: Lenso reverse image lookup
+name: Direct reverse image lookup
 
 on:
   workflow_dispatch:
@@ -23,115 +23,120 @@ jobs:
           convert photo-small.jpg -resize 1200x -quality 96 photo.jpg
           identify photo.jpg
 
-      - name: Search with lenso.ai
+      - name: Yandex CBIR API
         continue-on-error: true
         run: |
-          python -m pip install -q selenium
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+          URL='https://yandex.com/images/touch/search?rpt=imageview&format=json&request={"blocks":[{"block":"cbir-uploader__get-cbir-id"}]}'
+          curl -sS -L -A "$UA" \
+            -H 'X-Requested-With: XMLHttpRequest' \
+            -H 'Accept: application/json, text/javascript, */*; q=0.01' \
+            -F 'upfile=@photo.jpg;type=image/jpeg' \
+            "$URL" -D yandex-api-headers.txt -o yandex-api.json
+          echo '=== YANDEX API HEADERS ==='
+          cat yandex-api-headers.txt
+          echo '=== YANDEX API BODY ==='
+          head -c 12000 yandex-api.json
+          echo
           python - <<'PY'
-          import json, pathlib, time
-          from selenium import webdriver
-          from selenium.webdriver.chrome.options import Options
-          from selenium.webdriver.common.by import By
-          from selenium.webdriver.support.ui import WebDriverWait
-          from selenium.webdriver.support import expected_conditions as EC
-
-          opts=Options()
-          opts.add_argument('--headless=new')
-          opts.add_argument('--no-sandbox')
-          opts.add_argument('--disable-dev-shm-usage')
-          opts.add_argument('--disable-gpu')
-          opts.add_argument('--window-size=1600,1200')
-          opts.add_argument('--lang=en-US')
-          opts.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36')
-          opts.set_capability('goog:loggingPrefs', {'performance':'ALL','browser':'ALL'})
-
-          driver=webdriver.Chrome(options=opts)
-          driver.execute_cdp_cmd('Network.enable', {})
-          wait=WebDriverWait(driver,30)
+          import json, pathlib, urllib.parse
+          p=pathlib.Path('yandex-api.json')
           try:
-              driver.get('https://lenso.ai/en')
-              time.sleep(5)
+              d=json.loads(p.read_text())
+              params=d['blocks'][0]['params']
+              cbir=params['cbirId']
+              original=params['originalImageUrl']
+              url='https://yandex.com/images/search?'+urllib.parse.urlencode({'cbir_id':cbir,'rpt':'imageview','tabInt':'1','url':original})
+              pathlib.Path('yandex-result-url.txt').write_text(url)
+              print('YANDEX_RESULT_URL='+url)
+          except Exception as e:
+              print('PARSE_ERROR',repr(e))
+              pathlib.Path('yandex-result-url.txt').write_text('')
+          PY
+          if [ -s yandex-result-url.txt ]; then
+            curl -sS -L -A "$UA" "$(cat yandex-result-url.txt)" -D yandex-result-headers.txt -o yandex-result.html
+          fi
+          python - <<'PY'
+          import re, html, pathlib, json
+          p=pathlib.Path('yandex-result.html')
+          if not p.exists(): raise SystemExit
+          s=html.unescape(p.read_text(errors='ignore'))
+          print('YANDEX_HTML_BYTES',len(s))
+          print('TITLE',re.findall(r'<title[^>]*>(.*?)</title>',s,re.I|re.S)[:3])
+          pats=[
+            r'"title":"([^\"]{4,300})"',
+            r'"snippet":"([^\"]{4,500})"',
+            r'"description":"([^\"]{4,500})"',
+            r'"url":"(https?://[^\"]+)"',
+            r'"pageUrl":"(https?://[^\"]+)"',
+            r'liberat[^\"<>]{0,250}',r'1944[^\"<>]{0,250}',r'priest[^\"<>]{0,250}',r'curé[^\"<>]{0,250}'
+          ]
+          for pat in pats:
+              vals=[]
+              for x in re.findall(pat,s,re.I):
+                  if isinstance(x,tuple): x=' '.join(x)
+                  x=x.replace('\\/','/')
+                  if x not in vals: vals.append(x)
+                  if len(vals)>=250: break
+              if vals:
+                  print('\nPATTERN',pat)
+                  print('\n'.join(vals))
+          PY
 
-              # Dismiss Cookiebot overlay when present.
-              try:
-                  allow=wait.until(EC.presence_of_element_located((By.XPATH,"//*[self::button or self::a][normalize-space()='Allow all']")))
-                  driver.execute_script('arguments[0].click()',allow)
-                  print('COOKIE_ACCEPTED')
-                  time.sleep(2)
-              except Exception as e:
-                  print('COOKIE_SKIP',type(e).__name__)
-
-              file_input=wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'input[type=file]')))
-              image_path=str(pathlib.Path('photo.jpg').resolve())
-              file_input.send_keys(image_path)
-              print('UPLOADED',image_path)
-
-              privacy=wait.until(EC.presence_of_element_located((By.ID,'privacy-policy')))
-              driver.execute_script('arguments[0].click()',privacy)
-              print('PRIVACY_CHECKED',privacy.is_selected())
-              time.sleep(1)
-
-              perform=wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'button.perfom-search-btn')))
-              print('PERFORM_DISABLED',perform.get_attribute('disabled'))
-              driver.execute_script('arguments[0].click()',perform)
-              print('PERFORM_CLICKED')
-
-              old_url=driver.current_url
-              for sec in range(1,91):
-                  time.sleep(1)
-                  if sec in (5,10,20,30,45,60,75,90):
-                      print('WAIT',sec,'URL',driver.current_url,'TITLE',driver.title)
-                  if '/search/' in driver.current_url or '/results/' in driver.current_url:
-                      if sec >= 20:
-                          break
-              time.sleep(10)
-
-              pathlib.Path('lenso-results.html').write_text(driver.page_source,encoding='utf-8')
-              driver.save_screenshot('lenso-results.png')
-              body=driver.find_element(By.TAG_NAME,'body').text
-              pathlib.Path('lenso-body.txt').write_text(body,encoding='utf-8')
-              print('FINAL_URL',driver.current_url)
-              print('BODY_START')
-              print(body[:80000])
-              print('BODY_END')
-
-              links=[]
-              for a in driver.find_elements(By.TAG_NAME,'a'):
-                  href=a.get_attribute('href')
-                  text=(a.text or '').strip()
-                  if href: links.append({'text':text[:500],'href':href})
-              pathlib.Path('lenso-links.json').write_text(json.dumps(links,ensure_ascii=False,indent=2),encoding='utf-8')
-              for x in links[:1000]: print('LINK',repr(x['text']),x['href'])
-
-              perf=driver.get_log('performance')
-              pathlib.Path('performance.json').write_text(json.dumps(perf),encoding='utf-8')
-              seen=[]
-              for entry in perf:
-                  try:
-                      msg=json.loads(entry['message'])['message']
-                      if msg['method']=='Network.responseReceived':
-                          p=msg['params']
-                          url=p['response']['url']
-                          if url not in seen:
-                              seen.append(url)
-                              print('RESPONSE',p.get('type'),p['response']['status'],url)
-                  except Exception:
-                      pass
-              pathlib.Path('response-urls.txt').write_text('\n'.join(seen),encoding='utf-8')
-          finally:
-              driver.quit()
+      - name: Bing mobile visual search API
+        continue-on-error: true
+        run: |
+          UA='Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Mobile Safari/537.36'
+          B64="$(base64 -w0 photo.jpg)"
+          ENDPOINT='https://www.bing.com/images/search?view=detailv2&iss=sbiupload&FORM=SBIHMP&sbifnm=photo.jpg'
+          curl -sS -L -A "$UA" \
+            --data-urlencode "imageBin=$B64" \
+            "$ENDPOINT" -D bing-headers.txt -o bing.html -w '%{url_effective}' > bing-final-url.txt
+          echo 'BING_FINAL_URL='
+          cat bing-final-url.txt
+          echo
+          echo '=== BING HEADERS ==='
+          cat bing-headers.txt
+          python - <<'PY'
+          import re, html, pathlib
+          p=pathlib.Path('bing.html')
+          if not p.exists(): raise SystemExit
+          s=html.unescape(p.read_text(errors='ignore'))
+          print('BING_HTML_BYTES',len(s))
+          print('TITLE',re.findall(r'<title[^>]*>(.*?)</title>',s,re.I|re.S)[:3])
+          pats=[
+            r'"title":"([^\"]{4,300})"',
+            r'"name":"([^\"]{4,300})"',
+            r'"description":"([^\"]{4,500})"',
+            r'"contentUrl":"(https?://[^\"]+)"',
+            r'"hostPageUrl":"(https?://[^\"]+)"',
+            r'https?://[^\"<> ]+',
+            r'liberat[^\"<>]{0,250}',r'1944[^\"<>]{0,250}',r'priest[^\"<>]{0,250}',r'curé[^\"<>]{0,250}'
+          ]
+          for pat in pats:
+              vals=[]
+              for x in re.findall(pat,s,re.I):
+                  if isinstance(x,tuple): x=' '.join(x)
+                  x=x.replace('\\/','/')
+                  if x not in vals: vals.append(x)
+                  if len(vals)>=250: break
+              if vals:
+                  print('\nPATTERN',pat)
+                  print('\n'.join(vals))
           PY
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: lenso-results
+          name: direct-reverse-results
           if-no-files-found: warn
           path: |
             photo.jpg
-            lenso-results.html
-            lenso-results.png
-            lenso-body.txt
-            lenso-links.json
-            performance.json
-            response-urls.txt
+            yandex-api.json
+            yandex-api-headers.txt
+            yandex-result-url.txt
+            yandex-result.html
+            yandex-result-headers.txt
+            bing.html
+            bing-headers.txt
+            bing-final-url.txt
