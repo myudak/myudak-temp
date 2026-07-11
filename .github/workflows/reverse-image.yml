@@ -1,0 +1,83 @@
+name: Reverse image lookup
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/reverse-image.yml'
+
+jobs:
+  lookup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract JPEG
+        run: |
+          python - <<'PY'
+          import base64, re, pathlib
+          text = pathlib.Path('ctf-photo.svg').read_text()
+          data = re.search(r'base64,([^\"]+)', text).group(1)
+          pathlib.Path('photo.jpg').write_bytes(base64.b64decode(data))
+          print('jpeg bytes', pathlib.Path('photo.jpg').stat().st_size)
+          PY
+      - name: Google reverse image search
+        run: |
+          set -x
+          curl -sS -L -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130 Safari/537.36' \
+            -D google-headers.txt \
+            -F 'encoded_image=@photo.jpg;type=image/jpeg' \
+            -F 'image_content=' \
+            'https://www.google.com/searchbyimage/upload' \
+            -o google.html
+          echo '=== GOOGLE HEADERS ==='
+          cat google-headers.txt
+          echo '=== GOOGLE TITLE ==='
+          grep -o '<title[^>]*>[^<]*' google.html | head -5 || true
+          echo '=== GOOGLE URL/TEXT HINTS ==='
+          python - <<'PY'
+          import re, html
+          s=open('google.html',errors='ignore').read()
+          s=html.unescape(s)
+          for pat in [r'https?://[^\"<> ]+', r'OSDFLAG[^\"<> ]*', r'liberat[^\"<>]{0,100}', r'1944[^\"<>]{0,100}']:
+              print('\nPATTERN',pat)
+              seen=[]
+              for x in re.findall(pat,s,re.I):
+                  if x not in seen:
+                      seen.append(x)
+                  if len(seen)>=40: break
+              print('\n'.join(seen))
+          PY
+      - name: Lens upload endpoint
+        run: |
+          curl -sS -L -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130 Safari/537.36' \
+            -D lens-headers.txt \
+            -F 'encoded_image=@photo.jpg;type=image/jpeg' \
+            -F 'processed_image_dimensions=320,249' \
+            'https://lens.google.com/v3/upload' \
+            -o lens.html || true
+          echo '=== LENS HEADERS ==='
+          cat lens-headers.txt || true
+          echo '=== LENS TITLE ==='
+          grep -o '<title[^>]*>[^<]*' lens.html | head -5 || true
+          echo '=== LENS HINTS ==='
+          python - <<'PY'
+          import re, html, pathlib
+          p=pathlib.Path('lens.html')
+          if not p.exists(): raise SystemExit
+          s=html.unescape(p.read_text(errors='ignore'))
+          for pat in [r'https?://[^\"<> ]+', r'liberat[^\"<>]{0,120}', r'1944[^\"<>]{0,120}', r'commune[^\"<>]{0,120}']:
+              print('\nPATTERN',pat)
+              seen=[]
+              for x in re.findall(pat,s,re.I):
+                  if x not in seen: seen.append(x)
+                  if len(seen)>=60: break
+              print('\n'.join(seen))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reverse-search-results
+          path: |
+            google.html
+            google-headers.txt
+            lens.html
+            lens-headers.txt
