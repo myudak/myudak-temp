@@ -13,7 +13,14 @@ jobs:
 
       - name: Extract image
         run: |
-          base64 -d original-photo.b64.1 > photo.jpg
+          python - <<'PY'
+          import base64
+          from pathlib import Path
+          text = ''.join(Path('original-photo.b64.1').read_text().split())
+          data = base64.b64decode(text, validate=False)
+          Path('photo.jpg').write_bytes(data)
+          print('decoded bytes', len(data))
+          PY
           file photo.jpg
           identify photo.jpg
           stat -c 'image bytes %s' photo.jpg
