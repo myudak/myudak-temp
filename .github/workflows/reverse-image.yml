@@ -10,97 +10,60 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract and upscale JPEG
+      - name: Extract image and make crops
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick
           python - <<'PY'
           import base64, re, pathlib
           text = pathlib.Path('ctf-photo.svg').read_text()
           data = re.search(r'base64,([^\"]+)', text).group(1)
-          pathlib.Path('photo-small.jpg').write_bytes(base64.b64decode(data))
+          pathlib.Path('full-small.jpg').write_bytes(base64.b64decode(data))
           PY
-          sudo apt-get update -qq || true
-          sudo apt-get install -y -qq imagemagick || true
-          if command -v magick >/dev/null 2>&1; then
-            magick photo-small.jpg -resize 800x -quality 95 photo.jpg || true
-          elif command -v convert >/dev/null 2>&1; then
-            convert photo-small.jpg -resize 800x -quality 95 photo.jpg || true
-          fi
-          if [ ! -s photo.jpg ]; then cp photo-small.jpg photo.jpg; fi
+          convert full-small.jpg -resize 1000x full.jpg
+          convert full-small.jpg -crop 180x220+80+45 +repage -resize 900x central.jpg
+          convert full-small.jpg -crop 240x200+0+45 +repage -resize 900x left.jpg
+          identify full.jpg central.jpg left.jpg
 
-      - name: Upload temporary public JPEG
+      - name: Pinterest visual searches
         run: |
-          B64="$(base64 -w0 photo.jpg)"
-          curl -sS -X POST \
-            -F 'key=6d207e02198a847aa98d0a2a901485a5' \
-            -F "source=$B64" \
-            -F 'format=json' \
-            'https://freeimage.host/api/1/upload' \
-            -o freeimage.json
-          python - <<'PY'
-          import json, pathlib
-          d=json.loads(pathlib.Path('freeimage.json').read_text())
-          im=d.get('image',{})
-          url=im.get('url') or im.get('display_url') or im.get('url_viewer') or ''
-          pathlib.Path('public-url.txt').write_text(url)
-          print('PUBLIC_URL='+url)
+          for IMG in full.jpg central.jpg left.jpg; do
+            BASE="${IMG%.jpg}"
+            echo "===== SEARCH $IMG ====="
+            curl -sS -X PUT \
+              -F "image=@$IMG;type=image/jpeg" \
+              -F 'x=0' -F 'y=0' -F 'w=1' -F 'h=1' \
+              -F 'base_scheme=https' \
+              'https://api.pinterest.com/v3/visual_search/extension/image/' \
+              -o "pinterest-$BASE.json"
+            python - "$BASE" <<'PY'
+          import json, pathlib, sys
+          base=sys.argv[1]
+          p=pathlib.Path('pinterest-'+base+'.json')
+          print('bytes',p.stat().st_size)
+          try: d=json.loads(p.read_text())
+          except Exception as e:
+              print('JSON ERROR',e); print(p.read_text(errors='ignore')[:4000]); raise SystemExit
+          print('status',d.get('status'),'message',d.get('message'))
+          data=d.get('data') or []
+          print('results',len(data))
+          for i,item in enumerate(data[:200]):
+              print('RESULT',i)
+              print('id=',item.get('id'))
+              print('description=',repr(item.get('description')))
+              print('link=',item.get('link') or item.get('domain') or item.get('source'))
+              print('image=',item.get('image_large_url') or item.get('image_medium_url') or item.get('image_url'))
+              print('raw=',json.dumps(item,ensure_ascii=False)[:1500])
           PY
-
-      - name: Render Google Lens with Chromium
-        continue-on-error: true
-        run: |
-          python -m pip install -q selenium
-          which google-chrome || true
-          google-chrome --version || true
-          python - <<'PY'
-          import pathlib, time, urllib.parse, re, json
-          from selenium import webdriver
-          from selenium.webdriver.chrome.options import Options
-          from selenium.webdriver.common.by import By
-
-          image_url=pathlib.Path('public-url.txt').read_text().strip()
-          lens='https://lens.google.com/uploadbyurl?url='+urllib.parse.quote(image_url,safe='')+'&ep=subb'
-          opts=Options()
-          opts.add_argument('--headless=new')
-          opts.add_argument('--no-sandbox')
-          opts.add_argument('--disable-dev-shm-usage')
-          opts.add_argument('--disable-gpu')
-          opts.add_argument('--window-size=1600,1200')
-          opts.add_argument('--lang=en-US')
-          opts.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36')
-          driver=webdriver.Chrome(options=opts)
-          try:
-              driver.get(lens)
-              time.sleep(15)
-              pathlib.Path('lens-rendered.html').write_text(driver.page_source,encoding='utf-8')
-              driver.save_screenshot('lens-rendered.png')
-              print('FINAL_URL='+driver.current_url)
-              print('TITLE='+driver.title)
-              print('BODY_TEXT_START')
-              text=driver.find_element(By.TAG_NAME,'body').text
-              print(text[:25000])
-              print('BODY_TEXT_END')
-              links=[]
-              for a in driver.find_elements(By.TAG_NAME,'a'):
-                  href=a.get_attribute('href')
-                  label=(a.text or '').strip()
-                  if href:
-                      links.append({'text':label[:300],'href':href})
-              pathlib.Path('lens-links.json').write_text(json.dumps(links,ensure_ascii=False,indent=2),encoding='utf-8')
-              for x in links[:300]:
-                  print('LINK',repr(x['text']),x['href'])
-          finally:
-              driver.quit()
-          PY
+          done
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: reverse-search-results
+          name: pinterest-results
           if-no-files-found: warn
           path: |
-            photo.jpg
-            freeimage.json
-            public-url.txt
-            lens-rendered.html
-            lens-rendered.png
-            lens-links.json
+            full.jpg
+            central.jpg
+            left.jpg
+            pinterest-*.json
