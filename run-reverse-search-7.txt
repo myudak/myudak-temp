@@ -1,0 +1,1 @@
+Trigger ImageMagick reverse-search workflow.
