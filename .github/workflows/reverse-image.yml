@@ -32,6 +32,8 @@ jobs:
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
           from selenium.webdriver.common.by import By
+          from selenium.webdriver.support.ui import WebDriverWait
+          from selenium.webdriver.support import expected_conditions as EC
 
           opts=Options()
           opts.add_argument('--headless=new')
@@ -45,49 +47,61 @@ jobs:
 
           driver=webdriver.Chrome(options=opts)
           driver.execute_cdp_cmd('Network.enable', {})
+          wait=WebDriverWait(driver,30)
           try:
               driver.get('https://lenso.ai/en')
-              time.sleep(8)
-              print('HOME_URL',driver.current_url)
-              print('HOME_TITLE',driver.title)
-              inputs=driver.find_elements(By.CSS_SELECTOR,'input')
-              print('INPUT_COUNT',len(inputs))
-              for i,el in enumerate(inputs):
-                  print('INPUT',i,el.get_attribute('type'),el.get_attribute('name'),el.get_attribute('accept'),el.get_attribute('class'))
-              buttons=driver.find_elements(By.CSS_SELECTOR,'button')
-              for i,b in enumerate(buttons[:80]):
-                  try: print('BUTTON',i,repr(b.text),b.get_attribute('aria-label'),b.get_attribute('class'))
-                  except: pass
-              file_inputs=driver.find_elements(By.CSS_SELECTOR,'input[type=file]')
-              if not file_inputs:
-                  pathlib.Path('lenso-home.html').write_text(driver.page_source,encoding='utf-8')
-                  driver.save_screenshot('lenso-home.png')
-                  raise RuntimeError('No file input found')
+              time.sleep(5)
+
+              # Dismiss Cookiebot overlay when present.
+              try:
+                  allow=wait.until(EC.presence_of_element_located((By.XPATH,"//*[self::button or self::a][normalize-space()='Allow all']")))
+                  driver.execute_script('arguments[0].click()',allow)
+                  print('COOKIE_ACCEPTED')
+                  time.sleep(2)
+              except Exception as e:
+                  print('COOKIE_SKIP',type(e).__name__)
+
+              file_input=wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'input[type=file]')))
               image_path=str(pathlib.Path('photo.jpg').resolve())
-              file_inputs[0].send_keys(image_path)
+              file_input.send_keys(image_path)
               print('UPLOADED',image_path)
-              for sec in range(1,61):
+
+              privacy=wait.until(EC.presence_of_element_located((By.ID,'privacy-policy')))
+              driver.execute_script('arguments[0].click()',privacy)
+              print('PRIVACY_CHECKED',privacy.is_selected())
+              time.sleep(1)
+
+              perform=wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'button.perfom-search-btn')))
+              print('PERFORM_DISABLED',perform.get_attribute('disabled'))
+              driver.execute_script('arguments[0].click()',perform)
+              print('PERFORM_CLICKED')
+
+              old_url=driver.current_url
+              for sec in range(1,91):
                   time.sleep(1)
-                  if sec in (5,10,20,30,45,60):
+                  if sec in (5,10,20,30,45,60,75,90):
                       print('WAIT',sec,'URL',driver.current_url,'TITLE',driver.title)
+                  if '/search/' in driver.current_url or '/results/' in driver.current_url:
+                      if sec >= 20:
+                          break
+              time.sleep(10)
+
               pathlib.Path('lenso-results.html').write_text(driver.page_source,encoding='utf-8')
               driver.save_screenshot('lenso-results.png')
-              try:
-                  body=driver.find_element(By.TAG_NAME,'body').text
-              except Exception:
-                  body=''
+              body=driver.find_element(By.TAG_NAME,'body').text
               pathlib.Path('lenso-body.txt').write_text(body,encoding='utf-8')
               print('FINAL_URL',driver.current_url)
               print('BODY_START')
-              print(body[:50000])
+              print(body[:80000])
               print('BODY_END')
+
               links=[]
               for a in driver.find_elements(By.TAG_NAME,'a'):
                   href=a.get_attribute('href')
                   text=(a.text or '').strip()
                   if href: links.append({'text':text[:500],'href':href})
               pathlib.Path('lenso-links.json').write_text(json.dumps(links,ensure_ascii=False,indent=2),encoding='utf-8')
-              for x in links[:500]: print('LINK',repr(x['text']),x['href'])
+              for x in links[:1000]: print('LINK',repr(x['text']),x['href'])
 
               perf=driver.get_log('performance')
               pathlib.Path('performance.json').write_text(json.dumps(perf),encoding='utf-8')
@@ -98,12 +112,12 @@ jobs:
                       if msg['method']=='Network.responseReceived':
                           p=msg['params']
                           url=p['response']['url']
-                          typ=p.get('type')
                           if url not in seen:
                               seen.append(url)
-                              print('RESPONSE',typ,p['response']['status'],url)
+                              print('RESPONSE',p.get('type'),p['response']['status'],url)
                   except Exception:
                       pass
+              pathlib.Path('response-urls.txt').write_text('\n'.join(seen),encoding='utf-8')
           finally:
               driver.quit()
           PY
@@ -115,10 +129,9 @@ jobs:
           if-no-files-found: warn
           path: |
             photo.jpg
-            lenso-home.html
-            lenso-home.png
             lenso-results.html
             lenso-results.png
             lenso-body.txt
             lenso-links.json
             performance.json
+            response-urls.txt
