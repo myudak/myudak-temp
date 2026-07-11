@@ -26,11 +26,8 @@ jobs:
             convert photo-small.jpg -resize 800x -quality 95 photo.jpg || true
           fi
           if [ ! -s photo.jpg ]; then cp photo-small.jpg photo.jpg; fi
-          file photo.jpg || true
-          ls -lh photo.jpg
 
       - name: Upload temporary public JPEG
-        continue-on-error: true
         run: |
           B64="$(base64 -w0 photo.jpg)"
           curl -sS -X POST \
@@ -39,7 +36,6 @@ jobs:
             -F 'format=json' \
             'https://freeimage.host/api/1/upload' \
             -o freeimage.json
-          cat freeimage.json
           python - <<'PY'
           import json, pathlib
           d=json.loads(pathlib.Path('freeimage.json').read_text())
@@ -49,45 +45,51 @@ jobs:
           print('PUBLIC_URL='+url)
           PY
 
-      - name: Search public image URL
+      - name: Render Google Lens with Chromium
         continue-on-error: true
         run: |
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-          URL="$(cat public-url.txt)"
-          ENC="$(python -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$URL")"
-          echo "URL=$URL"
-          curl -sS -L -A "$UA" "https://lens.google.com/uploadbyurl?url=$ENC&ep=subb" -o lens-url.html || true
-          curl -sS -L -A "$UA" "https://www.google.com/searchbyimage?image_url=$ENC&client=app" -o google-url.html || true
-          curl -sS -L -A "$UA" "https://www.bing.com/images/searchbyimage?cbir=sbi&imgurl=$ENC" -o bing.html || true
-          curl -sS -L -A "$UA" "https://tineye.com/search?url=$ENC" -o tineye.html || true
-          curl -sS -L -A "$UA" "https://yandex.com/images/search?rpt=imageview&url=$ENC" -o yandex-url.html || true
+          python -m pip install -q selenium
+          which google-chrome || true
+          google-chrome --version || true
           python - <<'PY'
-          import re, html, pathlib
-          for fn in ['lens-url.html','google-url.html','bing.html','tineye.html','yandex-url.html']:
-              p=pathlib.Path(fn)
-              print('\n\n===== '+fn+' =====')
-              if not p.exists():
-                  print('MISSING'); continue
-              s=html.unescape(p.read_text(errors='ignore'))
-              titles=re.findall(r'<title[^>]*>(.*?)</title>',s,re.I|re.S)
-              print('TITLE:', [re.sub('<.*?>','',x)[:300] for x in titles[:3]])
-              pats=[
-                r'https?://[^\"<> ]+',
-                r'"title":"([^\"]{4,250})"',
-                r'"name":"([^\"]{4,250})"',
-                r'liberat[^\"<>]{0,220}',r'1944[^\"<>]{0,220}',r'commune[^\"<>]{0,220}',
-                r'France[^\"<>]{0,160}',r'Belgium[^\"<>]{0,160}',r'Normandy[^\"<>]{0,160}'
-              ]
-              for pat in pats:
-                  vals=[]
-                  for x in re.findall(pat,s,re.I):
-                      if isinstance(x,tuple): x=' '.join(x)
-                      x=x.replace('\\/','/')
-                      if x not in vals: vals.append(x)
-                      if len(vals)>=80: break
-                  if vals:
-                      print('\nPATTERN',pat)
-                      print('\n'.join(vals))
+          import pathlib, time, urllib.parse, re, json
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.common.by import By
+
+          image_url=pathlib.Path('public-url.txt').read_text().strip()
+          lens='https://lens.google.com/uploadbyurl?url='+urllib.parse.quote(image_url,safe='')+'&ep=subb'
+          opts=Options()
+          opts.add_argument('--headless=new')
+          opts.add_argument('--no-sandbox')
+          opts.add_argument('--disable-dev-shm-usage')
+          opts.add_argument('--disable-gpu')
+          opts.add_argument('--window-size=1600,1200')
+          opts.add_argument('--lang=en-US')
+          opts.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36')
+          driver=webdriver.Chrome(options=opts)
+          try:
+              driver.get(lens)
+              time.sleep(15)
+              pathlib.Path('lens-rendered.html').write_text(driver.page_source,encoding='utf-8')
+              driver.save_screenshot('lens-rendered.png')
+              print('FINAL_URL='+driver.current_url)
+              print('TITLE='+driver.title)
+              print('BODY_TEXT_START')
+              text=driver.find_element(By.TAG_NAME,'body').text
+              print(text[:25000])
+              print('BODY_TEXT_END')
+              links=[]
+              for a in driver.find_elements(By.TAG_NAME,'a'):
+                  href=a.get_attribute('href')
+                  label=(a.text or '').strip()
+                  if href:
+                      links.append({'text':label[:300],'href':href})
+              pathlib.Path('lens-links.json').write_text(json.dumps(links,ensure_ascii=False,indent=2),encoding='utf-8')
+              for x in links[:300]:
+                  print('LINK',repr(x['text']),x['href'])
+          finally:
+              driver.quit()
           PY
 
       - uses: actions/upload-artifact@v4
@@ -99,8 +101,6 @@ jobs:
             photo.jpg
             freeimage.json
             public-url.txt
-            lens-url.html
-            google-url.html
-            bing.html
-            tineye.html
-            yandex-url.html
+            lens-rendered.html
+            lens-rendered.png
+            lens-links.json
