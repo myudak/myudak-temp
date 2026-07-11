@@ -1,4 +1,4 @@
-name: Direct reverse image lookup
+name: Browser reverse image lookup
 
 on:
   workflow_dispatch:
@@ -7,125 +7,108 @@ on:
 jobs:
   lookup:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract and enlarge image
+      - name: Extract image
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq imagemagick
           python - <<'PY'
           import base64, re, pathlib
           text = pathlib.Path('ctf-photo.svg').read_text()
           data = re.search(r'base64,([^\"]+)', text).group(1)
-          pathlib.Path('photo-small.jpg').write_bytes(base64.b64decode(data))
+          pathlib.Path('photo.jpg').write_bytes(base64.b64decode(data))
+          print('image bytes', pathlib.Path('photo.jpg').stat().st_size)
           PY
-          convert photo-small.jpg -resize 1200x -quality 96 photo.jpg
-          identify photo.jpg
 
-      - name: Yandex CBIR API
+      - name: Install browser
+        run: |
+          python -m pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run Bing, Google Lens and Yandex in Chromium
         continue-on-error: true
         run: |
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-          REQ='%7B%22blocks%22%3A%5B%7B%22block%22%3A%22cbir-uploader__get-cbir-id%22%7D%5D%7D'
-          for HOST in yandex.com yandex.ru; do
-            URL="https://$HOST/images/touch/search?rpt=imageview&format=json&request=$REQ"
-            curl -sS -L -A "$UA" \
-              -H 'X-Requested-With: XMLHttpRequest' \
-              -H 'Accept: application/json, text/javascript, */*; q=0.01' \
-              -F 'upfile=@photo.jpg;type=image/jpeg' \
-              "$URL" -D "yandex-api-$HOST-headers.txt" -o "yandex-api-$HOST.json" || true
-            echo "=== $HOST BODY ==="
-            head -c 12000 "yandex-api-$HOST.json" 2>/dev/null || true
-            echo
-          done
-          python - <<'PY'
-          import json, pathlib, urllib.parse
-          chosen=None
-          for host in ('yandex.com','yandex.ru'):
-              p=pathlib.Path(f'yandex-api-{host}.json')
+          cat > reverse_browser.py <<'PY'
+          import asyncio, json
+          from pathlib import Path
+          from playwright.async_api import async_playwright
+
+          KEYWORDS = ('visual', 'insight', 'image', 'lens', 'search', 'similar', 'include', 'exact', 'api')
+
+          async def run_engine(browser, name, url):
+              context = await browser.new_context(
+                  user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                  locale='en-US',
+                  viewport={'width': 1440, 'height': 1000},
+              )
+              page = await context.new_page()
+              records = []
+
+              async def save_response(resp):
+                  u = resp.url
+                  ctype = (resp.headers.get('content-type') or '').lower()
+                  if any(k in u.lower() for k in KEYWORDS) and ('json' in ctype or 'html' in ctype or 'text' in ctype):
+                      try:
+                          body = await resp.text()
+                      except Exception:
+                          return
+                      if body:
+                          records.append({'url': u, 'status': resp.status, 'content_type': ctype, 'body': body[:500000]})
+
+              page.on('response', lambda r: asyncio.create_task(save_response(r)))
+              print(f'[{name}] opening {url}')
               try:
-                  d=json.loads(p.read_text())
-                  params=d['blocks'][0]['params']
-                  chosen=(host,params['cbirId'],params['originalImageUrl'])
-                  break
+                  await page.goto(url, wait_until='domcontentloaded', timeout=90000)
+                  await page.wait_for_timeout(4000)
+                  print(f'[{name}] initial url={page.url} title={await page.title()}')
+                  count = await page.locator('input[type=file]').count()
+                  print(f'[{name}] file inputs={count}')
+                  if count:
+                      await page.locator('input[type=file]').first.set_input_files('photo.jpg')
+                      await page.wait_for_timeout(30000)
+                  print(f'[{name}] final url={page.url} title={await page.title()}')
+                  Path(f'{name}.html').write_text(await page.content(), errors='ignore')
+                  try:
+                      text = await page.locator('body').inner_text(timeout=10000)
+                  except Exception:
+                      text = ''
+                  Path(f'{name}.txt').write_text(text, errors='ignore')
+                  await page.screenshot(path=f'{name}.png', full_page=True)
               except Exception as e:
-                  print(host,'PARSE_ERROR',repr(e))
-          if chosen:
-              host,cbir,original=chosen
-              url=f'https://{host}/images/search?'+urllib.parse.urlencode({'cbir_id':cbir,'rpt':'imageview','tabInt':'1','url':original})
-          else:
-              url=''
-          pathlib.Path('yandex-result-url.txt').write_text(url)
-          print('YANDEX_RESULT_URL='+url)
-          PY
-          if [ -s yandex-result-url.txt ]; then
-            curl -sS -L -A "$UA" "$(cat yandex-result-url.txt)" -D yandex-result-headers.txt -o yandex-result.html
-          fi
-          python - <<'PY'
-          import re, html, pathlib
-          p=pathlib.Path('yandex-result.html')
-          if not p.exists(): raise SystemExit
-          s=html.unescape(p.read_text(errors='ignore'))
-          print('YANDEX_HTML_BYTES',len(s))
-          print('TITLE',re.findall(r'<title[^>]*>(.*?)</title>',s,re.I|re.S)[:3])
-          pats=[r'"title":"([^\"]{4,300})"',r'"snippet":"([^\"]{4,500})"',r'"description":"([^\"]{4,500})"',r'"url":"(https?://[^\"]+)"',r'"pageUrl":"(https?://[^\"]+)"',r'liberat[^\"<>]{0,250}',r'1944[^\"<>]{0,250}',r'priest[^\"<>]{0,250}',r'curé[^\"<>]{0,250}']
-          for pat in pats:
-              vals=[]
-              for x in re.findall(pat,s,re.I):
-                  if isinstance(x,tuple): x=' '.join(x)
-                  x=x.replace('\\/','/')
-                  if x not in vals: vals.append(x)
-                  if len(vals)>=300: break
-              if vals:
-                  print('\nPATTERN',pat)
-                  print('\n'.join(vals))
-          PY
+                  Path(f'{name}-error.txt').write_text(repr(e))
+                  print(f'[{name}] ERROR {e!r}')
+              Path(f'{name}-responses.json').write_text(json.dumps(records, ensure_ascii=False))
+              print(f'[{name}] captured responses={len(records)}')
+              await context.close()
 
-      - name: Bing mobile visual search API
-        continue-on-error: true
-        run: |
-          UA='Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Mobile Safari/537.36'
-          B64="$(base64 -w0 photo.jpg)"
-          ENDPOINT='https://www.bing.com/images/search?view=detailv2&iss=sbiupload&FORM=SBIHMP&sbifnm=photo.jpg'
-          curl -sS -L -A "$UA" \
-            -F "imageBin=$B64" \
-            "$ENDPOINT" -D bing-headers.txt -o bing.html -w '%{url_effective}' > bing-final-url.txt
-          echo 'BING_FINAL_URL='
-          cat bing-final-url.txt
-          echo
-          python - <<'PY'
-          import re, html, pathlib
-          p=pathlib.Path('bing.html')
-          if not p.exists(): raise SystemExit
-          s=html.unescape(p.read_text(errors='ignore'))
-          print('BING_HTML_BYTES',len(s))
-          print('TITLE',re.findall(r'<title[^>]*>(.*?)</title>',s,re.I|re.S)[:3])
-          pats=[r'"title":"([^\"]{4,300})"',r'"name":"([^\"]{4,300})"',r'"description":"([^\"]{4,500})"',r'"contentUrl":"(https?://[^\"]+)"',r'"hostPageUrl":"(https?://[^\"]+)"',r'https?://[^\"<> ]+',r'liberat[^\"<>]{0,250}',r'1944[^\"<>]{0,250}',r'priest[^\"<>]{0,250}',r'curé[^\"<>]{0,250}']
-          for pat in pats:
-              vals=[]
-              for x in re.findall(pat,s,re.I):
-                  if isinstance(x,tuple): x=' '.join(x)
-                  x=x.replace('\\/','/')
-                  if x not in vals: vals.append(x)
-                  if len(vals)>=300: break
-              if vals:
-                  print('\nPATTERN',pat)
-                  print('\n'.join(vals))
+          async def main():
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch(headless=True)
+                  await run_engine(browser, 'bing-browser', 'https://www.bing.com/images')
+                  await run_engine(browser, 'google-lens-browser', 'https://lens.google.com/')
+                  await run_engine(browser, 'yandex-browser', 'https://yandex.com/images/')
+                  await browser.close()
+
+          asyncio.run(main())
           PY
+          python reverse_browser.py
+          echo '=== BING BODY ==='
+          sed -n '1,240p' bing-browser.txt 2>/dev/null || true
+          echo '=== GOOGLE LENS BODY ==='
+          sed -n '1,240p' google-lens-browser.txt 2>/dev/null || true
+          echo '=== YANDEX BODY ==='
+          sed -n '1,240p' yandex-browser.txt 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: direct-reverse-results
+          name: browser-reverse-results
           if-no-files-found: warn
           path: |
             photo.jpg
-            yandex-api-*.json
-            yandex-api-*-headers.txt
-            yandex-result-url.txt
-            yandex-result.html
-            yandex-result-headers.txt
-            bing.html
-            bing-headers.txt
-            bing-final-url.txt
+            *-browser.html
+            *-browser.txt
+            *-browser.png
+            *-browser-responses.json
+            *-browser-error.txt
