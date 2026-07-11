@@ -2,9 +2,6 @@ name: Reverse image lookup
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/reverse-image.yml'
   pull_request:
 
 jobs:
@@ -12,6 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Extract and upscale JPEG
         run: |
           python - <<'PY'
@@ -31,85 +29,65 @@ jobs:
           file photo.jpg || true
           ls -lh photo.jpg
 
-      - name: Yandex reverse image search
+      - name: Upload temporary public JPEG
         continue-on-error: true
         run: |
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-          curl -sS -A "$UA" -D yandex-upload-headers.txt \
-            -F 'upfile=@photo.jpg;type=image/jpeg' \
-            'https://yandex.com/images-apphost/image-download' \
-            -o yandex-upload.json || true
-          echo '=== YANDEX UPLOAD HEADERS ==='
-          cat yandex-upload-headers.txt || true
-          echo '=== YANDEX UPLOAD BODY ==='
-          head -c 4000 yandex-upload.json || true
+          B64="$(base64 -w0 photo.jpg)"
+          curl -sS -X POST \
+            -F 'key=6d207e02198a847aa98d0a2a901485a5' \
+            -F "source=$B64" \
+            -F 'format=json' \
+            'https://freeimage.host/api/1/upload' \
+            -o freeimage.json
+          cat freeimage.json
           python - <<'PY'
-          import json, pathlib, urllib.parse
-          p=pathlib.Path('yandex-upload.json')
-          try:
-              data=json.loads(p.read_text())
-          except Exception as e:
-              print('Yandex JSON error:',e)
-              pathlib.Path('yandex-search-url.txt').write_text('')
-              raise SystemExit
-          params={'rpt':'imageview','url':data.get('url','')}
-          image_id=data.get('id') or data.get('image_id')
-          if image_id: params['cbir_id']=image_id
-          url='https://yandex.com/images/search?'+urllib.parse.urlencode(params)
-          pathlib.Path('yandex-search-url.txt').write_text(url)
-          print('SEARCH_URL='+url)
-          PY
-          if [ -s yandex-search-url.txt ]; then
-            curl -sS -L -A "$UA" -D yandex-search-headers.txt "$(cat yandex-search-url.txt)" -o yandex.html || true
-          fi
-          echo '=== YANDEX TITLE ==='
-          grep -o '<title[^>]*>[^<]*' yandex.html 2>/dev/null | head -5 || true
-          echo '=== YANDEX RESULT URLS/TEXT ==='
-          python - <<'PY'
-          import re, html, pathlib
-          p=pathlib.Path('yandex.html')
-          if not p.exists(): raise SystemExit
-          s=html.unescape(p.read_text(errors='ignore'))
-          pats=[r'"url":"(https?://[^\"]+)"',r'"source_url":"(https?://[^\"]+)"',r'"page_url":"(https?://[^\"]+)"',r'"title":"([^\"]{4,200})"',r'liberat[^\"<>]{0,180}',r'1944[^\"<>]{0,180}',r'commune[^\"<>]{0,180}']
-          for pat in pats:
-              print('\nPATTERN',pat)
-              seen=[]
-              for x in re.findall(pat,s,re.I):
-                  if isinstance(x,tuple): x=' '.join(x)
-                  x=x.replace('\\/','/')
-                  if x not in seen: seen.append(x)
-                  if len(seen)>=100: break
-              print('\n'.join(seen))
+          import json, pathlib
+          d=json.loads(pathlib.Path('freeimage.json').read_text())
+          im=d.get('image',{})
+          url=im.get('url') or im.get('display_url') or im.get('url_viewer') or ''
+          pathlib.Path('public-url.txt').write_text(url)
+          print('PUBLIC_URL='+url)
           PY
 
-      - name: Google Lens upload endpoint
+      - name: Search public image URL
         continue-on-error: true
         run: |
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-          curl -sS -L -A "$UA" \
-            -D lens-headers.txt \
-            -F 'encoded_image=@photo.jpg;type=image/jpeg' \
-            -F 'sbisrc=Chromium' \
-            'https://lens.google.com/v3/upload' \
-            -o lens.html || true
-          echo '=== LENS HEADERS ==='
-          cat lens-headers.txt || true
-          echo '=== LENS TITLE ==='
-          grep -o '<title[^>]*>[^<]*' lens.html | head -5 || true
-          echo '=== LENS URLS/TEXT ==='
+          URL="$(cat public-url.txt)"
+          ENC="$(python -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$URL")"
+          echo "URL=$URL"
+          curl -sS -L -A "$UA" "https://lens.google.com/uploadbyurl?url=$ENC&ep=subb" -o lens-url.html || true
+          curl -sS -L -A "$UA" "https://www.google.com/searchbyimage?image_url=$ENC&client=app" -o google-url.html || true
+          curl -sS -L -A "$UA" "https://www.bing.com/images/searchbyimage?cbir=sbi&imgurl=$ENC" -o bing.html || true
+          curl -sS -L -A "$UA" "https://tineye.com/search?url=$ENC" -o tineye.html || true
+          curl -sS -L -A "$UA" "https://yandex.com/images/search?rpt=imageview&url=$ENC" -o yandex-url.html || true
           python - <<'PY'
           import re, html, pathlib
-          p=pathlib.Path('lens.html')
-          if not p.exists(): raise SystemExit
-          s=html.unescape(p.read_text(errors='ignore'))
-          pats=[r'https?://[^\"<> ]+',r'liberat[^\"<>]{0,180}',r'1944[^\"<>]{0,180}',r'commune[^\"<>]{0,180}']
-          for pat in pats:
-              print('\nPATTERN',pat)
-              seen=[]
-              for x in re.findall(pat,s,re.I):
-                  if x not in seen: seen.append(x)
-                  if len(seen)>=100: break
-              print('\n'.join(seen))
+          for fn in ['lens-url.html','google-url.html','bing.html','tineye.html','yandex-url.html']:
+              p=pathlib.Path(fn)
+              print('\n\n===== '+fn+' =====')
+              if not p.exists():
+                  print('MISSING'); continue
+              s=html.unescape(p.read_text(errors='ignore'))
+              titles=re.findall(r'<title[^>]*>(.*?)</title>',s,re.I|re.S)
+              print('TITLE:', [re.sub('<.*?>','',x)[:300] for x in titles[:3]])
+              pats=[
+                r'https?://[^\"<> ]+',
+                r'"title":"([^\"]{4,250})"',
+                r'"name":"([^\"]{4,250})"',
+                r'liberat[^\"<>]{0,220}',r'1944[^\"<>]{0,220}',r'commune[^\"<>]{0,220}',
+                r'France[^\"<>]{0,160}',r'Belgium[^\"<>]{0,160}',r'Normandy[^\"<>]{0,160}'
+              ]
+              for pat in pats:
+                  vals=[]
+                  for x in re.findall(pat,s,re.I):
+                      if isinstance(x,tuple): x=' '.join(x)
+                      x=x.replace('\\/','/')
+                      if x not in vals: vals.append(x)
+                      if len(vals)>=80: break
+                  if vals:
+                      print('\nPATTERN',pat)
+                      print('\n'.join(vals))
           PY
 
       - uses: actions/upload-artifact@v4
@@ -119,11 +97,10 @@ jobs:
           if-no-files-found: warn
           path: |
             photo.jpg
-            photo-small.jpg
-            yandex-upload.json
-            yandex-upload-headers.txt
-            yandex-search-url.txt
-            yandex-search-headers.txt
-            yandex.html
-            lens.html
-            lens-headers.txt
+            freeimage.json
+            public-url.txt
+            lens-url.html
+            google-url.html
+            bing.html
+            tineye.html
+            yandex-url.html
