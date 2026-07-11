@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - '.github/workflows/reverse-image.yml'
+  pull_request:
 
 jobs:
   lookup:
