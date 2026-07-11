@@ -23,17 +23,26 @@ jobs:
           PY
 
       - name: Yandex reverse image search
+        continue-on-error: true
         run: |
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-          curl -sS -A "$UA" \
+          curl -sS -A "$UA" -D yandex-upload-headers.txt \
             -F 'upfile=@photo.jpg;type=image/jpeg' \
             'https://yandex.com/images-apphost/image-download' \
-            -o yandex-upload.json
-          echo '=== YANDEX UPLOAD ==='
-          cat yandex-upload.json
+            -o yandex-upload.json || true
+          echo '=== YANDEX UPLOAD HEADERS ==='
+          cat yandex-upload-headers.txt || true
+          echo '=== YANDEX UPLOAD BODY ==='
+          head -c 4000 yandex-upload.json || true
           python - <<'PY'
           import json, pathlib, urllib.parse
-          data=json.loads(pathlib.Path('yandex-upload.json').read_text())
+          p=pathlib.Path('yandex-upload.json')
+          try:
+              data=json.loads(p.read_text())
+          except Exception as e:
+              print('Yandex JSON error:',e)
+              pathlib.Path('yandex-search-url.txt').write_text('')
+              raise SystemExit
           params={'rpt':'imageview','url':data.get('url','')}
           image_id=data.get('id') or data.get('image_id')
           if image_id: params['cbir_id']=image_id
@@ -41,20 +50,18 @@ jobs:
           pathlib.Path('yandex-search-url.txt').write_text(url)
           print('SEARCH_URL='+url)
           PY
-          curl -sS -L -A "$UA" "$(cat yandex-search-url.txt)" -o yandex.html
+          if [ -s yandex-search-url.txt ]; then
+            curl -sS -L -A "$UA" -D yandex-search-headers.txt "$(cat yandex-search-url.txt)" -o yandex.html || true
+          fi
           echo '=== YANDEX TITLE ==='
-          grep -o '<title[^>]*>[^<]*' yandex.html | head -5 || true
+          grep -o '<title[^>]*>[^<]*' yandex.html 2>/dev/null | head -5 || true
           echo '=== YANDEX RESULT URLS/TEXT ==='
           python - <<'PY'
-          import re, html, pathlib, json
-          s=html.unescape(pathlib.Path('yandex.html').read_text(errors='ignore'))
-          pats=[
-            r'"url":"(https?://[^\"]+)"',
-            r'"source_url":"(https?://[^\"]+)"',
-            r'"page_url":"(https?://[^\"]+)"',
-            r'"title":"([^\"]{4,200})"',
-            r'liberat[^\"<>]{0,180}', r'1944[^\"<>]{0,180}', r'commune[^\"<>]{0,180}'
-          ]
+          import re, html, pathlib
+          p=pathlib.Path('yandex.html')
+          if not p.exists(): raise SystemExit
+          s=html.unescape(p.read_text(errors='ignore'))
+          pats=[r'"url":"(https?://[^\"]+)"',r'"source_url":"(https?://[^\"]+)"',r'"page_url":"(https?://[^\"]+)"',r'"title":"([^\"]{4,200})"',r'liberat[^\"<>]{0,180}',r'1944[^\"<>]{0,180}',r'commune[^\"<>]{0,180}']
           for pat in pats:
               print('\nPATTERN',pat)
               seen=[]
@@ -67,6 +74,7 @@ jobs:
           PY
 
       - name: Google Lens upload endpoint
+        continue-on-error: true
         run: |
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
           curl -sS -L -A "$UA" \
@@ -85,7 +93,7 @@ jobs:
           p=pathlib.Path('lens.html')
           if not p.exists(): raise SystemExit
           s=html.unescape(p.read_text(errors='ignore'))
-          pats=[r'https?://[^\"<> ]+', r'liberat[^\"<>]{0,180}', r'1944[^\"<>]{0,180}', r'commune[^\"<>]{0,180}']
+          pats=[r'https?://[^\"<> ]+',r'liberat[^\"<>]{0,180}',r'1944[^\"<>]{0,180}',r'commune[^\"<>]{0,180}']
           for pat in pats:
               print('\nPATTERN',pat)
               seen=[]
@@ -96,12 +104,16 @@ jobs:
           PY
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: reverse-search-results
+          if-no-files-found: warn
           path: |
             photo.jpg
             yandex-upload.json
+            yandex-upload-headers.txt
             yandex-search-url.txt
+            yandex-search-headers.txt
             yandex.html
             lens.html
             lens-headers.txt
