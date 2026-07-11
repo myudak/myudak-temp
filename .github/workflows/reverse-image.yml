@@ -13,7 +13,7 @@ jobs:
 
       - name: Extract image
         run: |
-          cat original-photo.b64.1 original-photo.b64.2 | base64 -d > photo.jpg
+          base64 -d original-photo.b64.1 > photo.jpg
           file photo.jpg
           identify photo.jpg
           stat -c 'image bytes %s' photo.jpg
