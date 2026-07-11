@@ -15,14 +15,11 @@ jobs:
         run: |
           python - <<'PY'
           import base64
-          from io import BytesIO
           from pathlib import Path
-          from PIL import Image
           text = ''.join(Path('original-photo.b64.1').read_text().split())
           data = base64.b64decode(text, validate=False)
-          image = Image.open(BytesIO(data)).convert('RGB')
-          image.save('photo.jpg', quality=92, optimize=True)
-          print('clean image', image.size, Path('photo.jpg').stat().st_size)
+          Path('photo.jpg').write_bytes(data)
+          print('decoded bytes', len(data))
           PY
           file photo.jpg
           identify photo.jpg || true
